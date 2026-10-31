@@ -17,8 +17,10 @@ import 'package:yaabsa/provider/core/user_providers.dart';
 import 'package:yaabsa/provider/player/session_provider.dart';
 import 'package:yaabsa/screens/wear/components/wear_fixed_view.dart';
 import 'package:yaabsa/screens/wear/components/wear_ambient_view.dart';
+import 'package:yaabsa/screens/wear/components/wear_scroll_view.dart';
 import 'package:yaabsa/screens/wear/components/wear_swipe_to_dismiss.dart';
 import 'package:yaabsa/screens/wear/components/wear_volume_control.dart';
+import 'package:yaabsa/screens/wear/wear_library_screen.dart';
 import 'package:yaabsa/util/audio_handler/wear_audio_handler.dart';
 import 'package:yaabsa/util/extensions.dart';
 import 'package:yaabsa/util/globals.dart' show BreakpointContextX, downloadHandler;
@@ -38,6 +40,11 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
   bool _isPlaying = false, _isLoading = true, _isDownloaded = false, _isDownloading = false;
   double _volume = 0.7, _downloadProgress = 0.0;
   Duration _position = Duration.zero;
+  List<MediaProgress>? _progressList;
+
+  /// When the user picked an item in the library browser; remote progress
+  /// older than this must not switch away from the picked item.
+  int _pickedAtMs = 0;
   DateTime _now = DateTime.now();
   StreamSubscription<PlaybackState>? _ps;
   StreamSubscription<Duration>? _pos;
@@ -115,6 +122,7 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
     final itemId = _itemId;
     final sameItem = itemId != null && progress.libraryItemId == itemId && progress.episodeId == _episodeId;
     if (!sameItem) {
+      if ((progress.lastUpdate ?? 0) <= _pickedAtMs) return;
       return _load();
     }
 
@@ -205,6 +213,7 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
         }
       }
       mp ??= user.mediaProgress;
+      _progressList = mp;
       if (mp == null || mp.isEmpty) {
         return setState(() {
           _error = 'No listening history';
@@ -247,20 +256,79 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
           _isLoading = false;
         });
       }
-      final loadedMedia = media;
-
-      final initialPosition = Duration(microseconds: ((lp.currentTime) * Duration.microsecondsPerSecond).round());
-      await _h.loadInternalMedia(loadedMedia, initialPosition: initialPosition);
-      _itemId = loadedMedia.itemId;
-      _episodeId = loadedMedia.episodeId;
+      await _applyMedia(media, _toDuration(lp.currentTime));
+    } catch (e) {
       setState(() {
-        _title = loadedMedia.title;
-        _author = loadedMedia.author ?? '';
-        _position = initialPosition;
-        _isPlaying = false;
+        _error = 'Failed: $e';
         _isLoading = false;
       });
+    }
+  }
+
+  Duration _toDuration(double seconds) => Duration(microseconds: (seconds * Duration.microsecondsPerSecond).round());
+
+  Future<void> _applyMedia(InternalMedia media, Duration initialPosition) async {
+    await _h.loadInternalMedia(media, initialPosition: initialPosition);
+    _itemId = media.itemId;
+    _episodeId = media.episodeId;
+    _taskProgress.clear();
+    if (!mounted) return;
+    setState(() {
+      _title = media.title;
+      _author = media.author ?? '';
+      _position = initialPosition;
+      _isPlaying = false;
+      _isLoading = false;
+      _isDownloading = false;
+      _downloadProgress = 0.0;
+    });
+  }
+
+  Future<void> _browse() async {
+    final pick = await Navigator.of(context).push<WearPick>(MaterialPageRoute(builder: (_) => const WearLibraryScreen()));
+    if (pick != null && mounted) await _playPicked(pick);
+  }
+
+  /// Opens an item picked in the library browser, resuming its own progress
+  /// (or starting from the beginning when it is new or already finished).
+  Future<void> _playPicked(WearPick pick) async {
+    if (pick.itemId == _itemId && pick.episodeId == _episodeId && _error == null) return;
+    final user = ref.read(currentUserProvider).value;
+    if (user == null) return;
+
+    await _h.pause();
+    _pickedAtMs = DateTime.now().millisecondsSinceEpoch;
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      MediaProgress? progress;
+      final api = ref.read(absApiProvider);
+      if (api != null) {
+        try {
+          progress = (await api.getMeApi().getProgress(pick.itemId, episodeId: pick.episodeId)).data;
+        } catch (_) {
+          // No progress yet (404) or offline; fall back to the cached list.
+        }
+      }
+      progress ??= _progressList
+          ?.where((p) => p.libraryItemId == pick.itemId && p.episodeId == pick.episodeId)
+          .firstOrNull;
+
+      final sessions = ref.read(sessionRepositoryProvider);
+      await sessions.closeSession();
+      final media = await sessions.openSession(pick.itemId, episodeId: pick.episodeId);
+      if (media == null || media.tracks.isEmpty) {
+        return setState(() {
+          _error = 'Could not play this item.\nDownload it or check your connection.';
+          _isLoading = false;
+        });
+      }
+      final start = progress == null || progress.isFinished ? Duration.zero : _toDuration(progress.currentTime);
+      await _applyMedia(media, start);
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = 'Failed: $e';
         _isLoading = false;
@@ -362,7 +430,7 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
   }
 
   Widget _err() {
-    return WearFixedView(
+    return WearScrollView(
       children: [
         Icon(Icons.error_outline, size: 32, color: Theme.of(context).colorScheme.error),
         const SizedBox(height: 8),
@@ -373,8 +441,13 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
         ),
         const SizedBox(height: 10),
         ElevatedButton(
-          onPressed: _load,
+          onPressed: _browse,
           style: ElevatedButton.styleFrom(minimumSize: const Size(48, 48)),
+          child: const Text('Browse library', style: TextStyle(fontSize: 12)),
+        ),
+        TextButton(
+          onPressed: _load,
+          style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
           child: const Text('Retry', style: TextStyle(fontSize: 12)),
         ),
       ],
@@ -385,7 +458,7 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
     final colorScheme = Theme.of(context).colorScheme;
     final time = '${_now.hour.toString().padLeft(2, '0')}:${_now.minute.toString().padLeft(2, '0')}';
 
-    return WearFixedView.builder(
+    final view = WearFixedView.builder(
       builder: (context, constraints) {
         final scaler = MediaQuery.textScalerOf(context);
         final compact = context.screenWidth < 225 || constraints.maxHeight < 180 || scaler.scale(12) > 15;
@@ -452,6 +525,7 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 _btn(Icons.volume_up, _vol, label: 'Volume', s: 22),
+                _btn(Icons.library_books, _browse, label: 'Browse library', s: 22),
                 if (_isDownloading)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -483,6 +557,14 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
           ],
         );
       },
+    );
+
+    // Swipe up opens the library browser.
+    return GestureDetector(
+      onVerticalDragEnd: (d) {
+        if ((d.primaryVelocity ?? 0) < -300) _browse();
+      },
+      child: view,
     );
   }
 
