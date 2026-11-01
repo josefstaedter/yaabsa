@@ -7,6 +7,7 @@ import 'package:yaabsa/models/internal_download.dart';
 import 'package:yaabsa/provider/common/library_provider.dart';
 import 'package:yaabsa/provider/common/stored_downloads_provider.dart';
 import 'package:yaabsa/provider/core/user_providers.dart';
+import 'package:yaabsa/util/globals.dart' show downloadHandler;
 
 /// The item the user picked to play: library item id and optional episode id.
 typedef WearPick = ({String itemId, String? episodeId});
@@ -25,9 +26,7 @@ class WearLibraryScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final downloads = (ref.watch(storedDownloadsProvider).value ?? const <InternalDownload>[])
-        .where((d) => d.item != null && !d.isPodcast && d.numberOfDownloadedTracks > 0)
-        .toList(growable: false);
+    final downloads = _playableDownloads(ref);
     final libraries = ref.watch(userLibrariesProvider);
     final bookLibraries = (libraries.value ?? const []).where((l) => l.mediaType == 'book').toList(growable: false);
 
@@ -41,7 +40,7 @@ class WearLibraryScreen extends ConsumerWidget {
               icon: Icons.file_download_done,
               title: 'Downloaded',
               subtitle: '${downloads.length}',
-              onTap: () => _open(context, _WearDownloadsScreen(downloads: downloads)),
+              onTap: () => _open(context, const _WearDownloadsScreen()),
             ),
           for (final library in bookLibraries)
             _WearTile(
@@ -62,13 +61,79 @@ class WearLibraryScreen extends ConsumerWidget {
   }
 }
 
-class _WearDownloadsScreen extends StatelessWidget {
-  const _WearDownloadsScreen({required this.downloads});
+List<InternalDownload> _playableDownloads(WidgetRef ref) =>
+    (ref.watch(storedDownloadsProvider).value ?? const <InternalDownload>[])
+        .where((d) => d.item != null && !d.isPodcast && d.numberOfDownloadedTracks > 0)
+        .toList(growable: false);
 
-  final List<InternalDownload> downloads;
+class _WearDownloadsScreen extends ConsumerWidget {
+  const _WearDownloadsScreen();
+
+  Future<void> _delete(BuildContext context, WidgetRef ref, InternalDownload download) async {
+    final colorScheme = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => Dialog(
+        insetPadding: const EdgeInsets.all(24),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Delete download?',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                download.item!.title,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.70)),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: 'Cancel',
+                    onPressed: () => Navigator.of(context).pop(false),
+                  ),
+                  IconButton.filled(
+                    icon: const Icon(Icons.delete),
+                    tooltip: 'Delete',
+                    style: IconButton.styleFrom(
+                      backgroundColor: colorScheme.error,
+                      foregroundColor: colorScheme.onError,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(true),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    final user = ref.read(currentUserProvider).value;
+    if (user == null) return;
+    var failed = false;
+    try {
+      failed = (await downloadHandler.deleteDownloadedItem(download, userId: user.id)).failedFiles > 0;
+    } catch (_) {
+      failed = true;
+    }
+    if (failed && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not delete download')));
+    }
+  }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final downloads = _playableDownloads(ref);
     return Scaffold(
       body: ListView(
         padding: _roundInsets,
@@ -79,7 +144,15 @@ class _WearDownloadsScreen extends StatelessWidget {
               title: download.item!.title,
               subtitle: download.item!.authorString,
               onTap: () => Navigator.of(context).pop<WearPick>((itemId: download.item!.id, episodeId: null)),
+              trailing: IconButton(
+                icon: Icon(Icons.delete_outline, size: 18, color: Theme.of(context).colorScheme.error),
+                tooltip: 'Delete download',
+                onPressed: () => _delete(context, ref, download),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              ),
             ),
+          if (downloads.isEmpty) const _Message('No downloads.'),
         ],
       ),
     );
@@ -104,10 +177,134 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
   bool _hasMore = true, _loading = false;
   String? _error;
 
+  final _searchController = TextEditingController();
+
+  /// Non-null while showing results for a submitted query instead of the paged list.
+  String? _query;
+  List<LibraryItem> _results = const [];
+  bool _searching = false;
+  String? _searchError;
+
   @override
   void initState() {
     super.initState();
     _loadMore();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _search(String raw) async {
+    final query = raw.trim();
+    if (query.isEmpty) {
+      _clearSearch();
+      return;
+    }
+    final api = ref.read(absApiProvider);
+    setState(() {
+      _query = query;
+      _results = const [];
+      _searching = api != null;
+      _searchError = api == null ? 'Not connected' : null;
+    });
+    if (api == null) return;
+    try {
+      final data = (await api.getLibraryApi().getSearchLibrary(widget.libraryId, query, limit: 25)).data;
+      if (!mounted || _query != query) return;
+      setState(() {
+        _results = (data?.book ?? const [])
+            .map((r) => r.libraryItem)
+            .whereType<LibraryItem>()
+            .where((i) => i.isMissing != true && i.isInvalid != true)
+            .toList(growable: false);
+        _searching = false;
+      });
+    } catch (_) {
+      if (!mounted || _query != query) return;
+      setState(() {
+        _searchError = 'Search failed';
+        _searching = false;
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _query = null;
+      _results = const [];
+      _searching = false;
+      _searchError = null;
+    });
+  }
+
+  Widget _searchField() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: TextField(
+        controller: _searchController,
+        textInputAction: TextInputAction.search,
+        onSubmitted: _search,
+        style: TextStyle(fontSize: 12, color: colorScheme.onSurface),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search',
+          hintStyle: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.54)),
+          prefixIcon: Icon(Icons.search, size: 16, color: colorScheme.onSurface.withValues(alpha: 0.54)),
+          prefixIconConstraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          suffixIcon: _query != null
+              ? IconButton(
+                  icon: Icon(Icons.close, size: 16, color: colorScheme.onSurface.withValues(alpha: 0.54)),
+                  onPressed: _clearSearch,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                )
+              : null,
+          filled: true,
+          fillColor: colorScheme.surfaceContainerHigh,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(18), borderSide: BorderSide.none),
+        ),
+      ),
+    );
+  }
+
+  Widget _searchResults() {
+    final children = <Widget>[_Header(widget.name), _searchField()];
+    if (_searching) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.all(12),
+          child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+        ),
+      );
+    } else if (_searchError != null) {
+      children.addAll([
+        _Message(_searchError!),
+        TextButton(
+          onPressed: () => _search(_query!),
+          child: const Text('Retry', style: TextStyle(fontSize: 12)),
+        ),
+      ]);
+    } else if (_results.isEmpty) {
+      children.add(const _Message('No matches.'));
+    } else {
+      for (final item in _results) {
+        children.add(
+          _WearTile(
+            title: item.title,
+            subtitle: item.authorString,
+            onTap: () => Navigator.of(context).pop<WearPick>((itemId: item.id, episodeId: null)),
+          ),
+        );
+      }
+    }
+    return ListView(padding: _roundInsets, children: children);
   }
 
   Future<void> _loadMore() async {
@@ -150,6 +347,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
 
   @override
   Widget build(BuildContext context) {
+    if (_query != null) return Scaffold(body: _searchResults());
     final showFooter = _loading || _error != null || _hasMore;
     return Scaffold(
       body: NotificationListener<ScrollNotification>(
@@ -159,10 +357,11 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
         },
         child: ListView.builder(
           padding: _roundInsets,
-          itemCount: 1 + _items.length + (showFooter ? 1 : 0) + (_items.isEmpty && !showFooter ? 1 : 0),
+          itemCount: 2 + _items.length + (showFooter ? 1 : 0) + (_items.isEmpty && !showFooter ? 1 : 0),
           itemBuilder: (context, index) {
             if (index == 0) return _Header(widget.name);
-            final i = index - 1;
+            if (index == 1) return _searchField();
+            final i = index - 2;
             if (i < _items.length) {
               final item = _items[i];
               return _WearTile(
@@ -229,11 +428,12 @@ class _Message extends StatelessWidget {
 }
 
 class _WearTile extends StatelessWidget {
-  const _WearTile({required this.title, required this.onTap, this.subtitle, this.icon});
+  const _WearTile({required this.title, required this.onTap, this.subtitle, this.icon, this.trailing});
 
   final String title;
   final String? subtitle;
   final IconData? icon;
+  final Widget? trailing;
   final VoidCallback onTap;
 
   @override
@@ -274,6 +474,7 @@ class _WearTile extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (trailing != null) ...[const SizedBox(width: 4), trailing!],
               ],
             ),
           ),
