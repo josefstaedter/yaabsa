@@ -6,11 +6,13 @@ import 'package:yaabsa/api/library/request/library_filter.dart';
 import 'package:yaabsa/api/library/request/library_items_request.dart';
 import 'package:yaabsa/api/library/request/library_sort.dart';
 import 'package:yaabsa/api/library_items/library_item.dart';
+import 'package:yaabsa/api/me/media_progress.dart';
 import 'package:yaabsa/api/library/search_series.dart';
 import 'package:yaabsa/models/internal_download.dart';
 import 'package:yaabsa/provider/common/library_provider.dart';
 import 'package:yaabsa/provider/common/stored_downloads_provider.dart';
 import 'package:yaabsa/provider/core/user_providers.dart';
+import 'package:yaabsa/util/server_version.dart';
 import 'package:yaabsa/screens/wear/components/wear_ambient_view.dart';
 import 'package:yaabsa/screens/wear/components/wear_scroll_view.dart';
 import 'package:yaabsa/screens/wear/components/wear_swipe_to_dismiss.dart';
@@ -34,8 +36,87 @@ void _pickBook(BuildContext context, String itemId) =>
 /// includes books hidden by permissions such as explicit content.
 String _bookCount(int? count) => count == null ? 'Series' : (count == 1 ? '1 book' : '$count books');
 
-/// Entry point for starting playback of something new on the watch: lists the
-/// downloaded items and the user's book libraries. Pops with a [WearPick].
+/// One entry of the "Continue listening" section: a book in progress (with its
+/// [progress], 0..1) or the next unstarted book of a series ([nextInSeries]).
+typedef _ContinueEntry = ({LibraryItem item, bool nextInSeries, double? progress});
+
+/// How many continue entries the top level shows before "Show all".
+const _continuePreviewCount = 3;
+
+/// The "Continue listening" and "Continue series" shelves of all book
+/// libraries, merged: books in progress first (most recently played first),
+/// then the next books of started series. The server applies library access
+/// and content permissions to the shelves.
+final _continueListeningProvider = FutureProvider.autoDispose<List<_ContinueEntry>>((ref) async {
+  final api = ref.watch(absApiProvider);
+  if (api == null) return const [];
+  final libraries = await ref.watch(userLibrariesProvider.future);
+
+  final shelvesFuture = Future.wait(
+    libraries.where((l) => l.mediaType == 'book').map((library) async {
+      try {
+        return (await api.getLibraryApi().getPersonalized(library.id)).data;
+      } catch (_) {
+        return null;
+      }
+    }),
+  );
+  final progressFuture = () async {
+    try {
+      if (!serverSupportsMediaProgressAndBookmarkRoutes(ref.read(serverVersionProvider))) {
+        return (await api.getMeApi().getUser()).data?.mediaProgress;
+      }
+      return (await api.getMeApi().getAllMediaProgress()).data?.mediaProgress;
+    } catch (_) {
+      return ref.read(currentUserProvider).value?.mediaProgress;
+    }
+  }();
+  final shelves = await shelvesFuture;
+  final progressByItem = {
+    for (final p in await progressFuture ?? const <MediaProgress>[])
+      if (p.episodeId == null) p.libraryItemId: p,
+  };
+
+  bool playable(LibraryItem i) => i.isMissing != true && i.isInvalid != true && i.collapsedSeries == null;
+  int lastUpdate(LibraryItem i) => progressByItem[i.id]?.lastUpdate ?? 0;
+
+  final inProgress = [for (final s in shelves) ...?s?.continueListening?.entities.where(playable)]
+    ..sort((a, b) => lastUpdate(b).compareTo(lastUpdate(a)));
+  final nextInSeries = [for (final s in shelves) ...?s?.continueSeries?.entities.where(playable)];
+
+  final seen = <String>{};
+  return [
+    for (final item in inProgress)
+      if (seen.add(item.id)) (item: item, nextInSeries: false, progress: progressByItem[item.id]?.progress),
+    for (final item in nextInSeries)
+      if (seen.add(item.id)) (item: item, nextInSeries: true, progress: null),
+  ];
+});
+
+Widget _continueTile(BuildContext context, _ContinueEntry entry) {
+  final item = entry.item;
+  final String? prefix;
+  final String? subtitle;
+  if (entry.nextInSeries) {
+    final sequence = item.seriesPosition?.trim();
+    prefix = sequence == null || sequence.isEmpty ? null : '#$sequence';
+    subtitle = item.seriesName ?? item.authorString;
+  } else {
+    final progress = entry.progress;
+    prefix = progress == null ? null : '${(progress * 100).clamp(0, 99).floor()}%';
+    subtitle = item.authorString;
+  }
+  return _WearTile(
+    title: item.title,
+    subtitlePrefix: prefix,
+    subtitle: subtitle,
+    onTap: () => _pickBook(context, item.id),
+  );
+}
+
+/// Entry point for starting playback of something new on the watch: lists
+/// what to continue, the downloaded items and the user's book libraries.
+/// Pops with a [WearPick].
 class WearLibraryScreen extends ConsumerStatefulWidget {
   const WearLibraryScreen({super.key});
 
@@ -65,11 +146,24 @@ class _WearLibraryScreenState extends ConsumerState<WearLibraryScreen> {
     final bookLibraries = libraries.isLoading
         ? const <Library>[]
         : (libraries.value ?? const []).where((l) => l.mediaType == 'book').toList(growable: false);
+    final continueEntries = ref.watch(_continueListeningProvider).value ?? const <_ContinueEntry>[];
 
     return _WearPage(
       child: WearScrollView(
         children: [
           const _Header('Library'),
+          if (continueEntries.isNotEmpty) ...[
+            const _SectionLabel('Continue listening'),
+            for (final entry in continueEntries.take(_continuePreviewCount)) _continueTile(context, entry),
+            if (continueEntries.length > _continuePreviewCount)
+              _WearTile(
+                title: 'Show all',
+                subtitle: '${continueEntries.length}',
+                chevron: true,
+                onTap: () => _open(context, _WearContinueScreen(entries: continueEntries)),
+              ),
+            const _SectionLabel('Browse'),
+          ],
           if (downloads.isNotEmpty)
             _WearTile(
               icon: Icons.file_download_done,
@@ -91,6 +185,21 @@ class _WearLibraryScreenState extends ConsumerState<WearLibraryScreen> {
       ),
     );
   }
+}
+
+class _WearContinueScreen extends StatelessWidget {
+  const _WearContinueScreen({required this.entries});
+
+  final List<_ContinueEntry> entries;
+
+  @override
+  Widget build(BuildContext context) => _WearPage(
+    child: WearScrollView.builder(
+      itemCount: entries.length + 1,
+      itemBuilder: (context, index) =>
+          index == 0 ? const _Header('Continue listening') : _continueTile(context, entries[index - 1]),
+    ),
+  );
 }
 
 List<InternalDownload> _playableDownloads(WidgetRef ref) =>
@@ -505,6 +614,28 @@ class _Header extends StatelessWidget {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.primary),
+    ),
+  );
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 8, bottom: 4),
+    child: Text(
+      text,
+      textAlign: TextAlign.center,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.70),
+      ),
     ),
   );
 }
