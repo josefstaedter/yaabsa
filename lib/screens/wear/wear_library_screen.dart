@@ -1,9 +1,11 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wear_plus/wear_plus.dart';
+import 'package:yaabsa/api/library/request/library_filter.dart';
 import 'package:yaabsa/api/library/request/library_items_request.dart';
 import 'package:yaabsa/api/library/request/library_sort.dart';
 import 'package:yaabsa/api/library_items/library_item.dart';
+import 'package:yaabsa/api/library_items/series.dart';
 import 'package:yaabsa/models/internal_download.dart';
 import 'package:yaabsa/provider/common/library_provider.dart';
 import 'package:yaabsa/provider/common/stored_downloads_provider.dart';
@@ -16,15 +18,24 @@ import 'package:yaabsa/util/globals.dart' show downloadHandler;
 /// The item the user picked to play: library item id and optional episode id.
 typedef WearPick = ({String itemId, String? episodeId});
 
+/// Pushes a nested browser screen and passes its [WearPick] on up the stack,
+/// so a pick at any depth ends up at the player.
+Future<void> _openAndForward(BuildContext context, Widget screen) async {
+  final pick = await Navigator.of(context).push<WearPick>(MaterialPageRoute(builder: (_) => screen));
+  if (pick != null && context.mounted) Navigator.of(context).pop(pick);
+}
+
+void _pickBook(BuildContext context, String itemId) =>
+    Navigator.of(context).pop<WearPick>((itemId: itemId, episodeId: null));
+
+String _bookCount(int? count) => count == null ? 'Series' : (count == 1 ? '1 book' : '$count books');
+
 /// Entry point for starting playback of something new on the watch: lists the
 /// downloaded items and the user's book libraries. Pops with a [WearPick].
 class WearLibraryScreen extends ConsumerWidget {
   const WearLibraryScreen({super.key});
 
-  Future<void> _open(BuildContext context, Widget screen) async {
-    final pick = await Navigator.of(context).push<WearPick>(MaterialPageRoute(builder: (_) => screen));
-    if (pick != null && context.mounted) Navigator.of(context).pop(pick);
-  }
+  Future<void> _open(BuildContext context, Widget screen) => _openAndForward(context, screen);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -143,7 +154,7 @@ class _WearDownloadsScreen extends ConsumerWidget {
             _WearTile(
               title: download.item!.title,
               subtitle: download.item!.authorString,
-              onTap: () => Navigator.of(context).pop<WearPick>((itemId: download.item!.id, episodeId: null)),
+              onTap: () => _pickBook(context, download.item!.id),
               trailing: IconButton(
                 icon: Icon(Icons.delete_outline, size: 22, color: Theme.of(context).colorScheme.error),
                 tooltip: 'Delete download',
@@ -159,11 +170,14 @@ class _WearDownloadsScreen extends ConsumerWidget {
   }
 }
 
+/// Paged book list of a library (series collapsed into one entry each), or,
+/// with [seriesId], the books of that series in reading order.
 class _WearLibraryItemsScreen extends ConsumerStatefulWidget {
-  const _WearLibraryItemsScreen({required this.libraryId, required this.name});
+  const _WearLibraryItemsScreen({required this.libraryId, required this.name, this.seriesId});
 
   final String libraryId;
   final String name;
+  final String? seriesId;
 
   @override
   ConsumerState<_WearLibraryItemsScreen> createState() => _WearLibraryItemsScreenState();
@@ -182,8 +196,45 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
   /// Non-null while showing results for a submitted query instead of the paged list.
   String? _query;
   List<LibraryItem> _results = const [];
+  List<Series> _seriesResults = const [];
   bool _searching = false;
   String? _searchError;
+
+  bool get _isSeries => widget.seriesId != null;
+
+  /// Header, plus the search field outside of a series.
+  int get _leadingRows => _isSeries ? 1 : 2;
+
+  void _openSeries(String seriesId, String name) =>
+      _openAndForward(context, _WearLibraryItemsScreen(libraryId: widget.libraryId, name: name, seriesId: seriesId));
+
+  Widget _seriesTile(String seriesId, String name, int? numBooks) => _WearTile(
+    icon: Icons.collections_bookmark,
+    title: name,
+    subtitle: _bookCount(numBooks),
+    chevron: true,
+    onTap: () => _openSeries(seriesId, name),
+  );
+
+  /// The position of [item] in the series being shown, e.g. "2" or "1.5".
+  String? _sequenceOf(LibraryItem item) {
+    final series = item.media?.bookMedia?.metadata.series;
+    final match = series?.where((s) => s.id == widget.seriesId).firstOrNull;
+    final sequence = (match?.sequence ?? item.seriesPosition)?.trim();
+    return sequence == null || sequence.isEmpty ? null : sequence;
+  }
+
+  Widget _itemTile(LibraryItem item) {
+    final collapsed = item.collapsedSeries;
+    if (collapsed != null) return _seriesTile(collapsed.id, item.title, collapsed.numBooks);
+    final sequence = _isSeries ? _sequenceOf(item) : null;
+    return _WearTile(
+      subtitlePrefix: sequence == null ? null : '#$sequence',
+      title: item.title,
+      subtitle: item.authorString,
+      onTap: () => _pickBook(context, item.id),
+    );
+  }
 
   @override
   void initState() {
@@ -207,6 +258,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
     setState(() {
       _query = query;
       _results = const [];
+      _seriesResults = const [];
       _searching = api != null;
       _searchError = api == null ? 'Not connected' : null;
     });
@@ -220,6 +272,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
             .whereType<LibraryItem>()
             .where((i) => i.isMissing != true && i.isInvalid != true)
             .toList(growable: false);
+        _seriesResults = (data?.series ?? const []).map((r) => r.series).toList(growable: false);
         _searching = false;
       });
     } catch (_) {
@@ -237,6 +290,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
     setState(() {
       _query = null;
       _results = const [];
+      _seriesResults = const [];
       _searching = false;
       _searchError = null;
     });
@@ -281,18 +335,14 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
       children.add(const _Spinner());
     } else if (_searchError != null) {
       children.addAll([_Message(_searchError!), _RetryButton(onPressed: () => _search(_query!))]);
-    } else if (_results.isEmpty) {
+    } else if (_results.isEmpty && _seriesResults.isEmpty) {
       children.add(const _Message('No matches.'));
     } else {
-      for (final item in _results) {
-        children.add(
-          _WearTile(
-            title: item.title,
-            subtitle: item.authorString,
-            onTap: () => Navigator.of(context).pop<WearPick>((itemId: item.id, episodeId: null)),
-          ),
-        );
+      // Series first: a matching series name is the more specific hit.
+      for (final series in _seriesResults) {
+        children.add(_seriesTile(series.id, series.name, series.numBooks ?? series.libraryItemIds?.length));
       }
+      children.addAll(_results.map(_itemTile));
     }
     return WearScrollView.builder(itemCount: children.length, itemBuilder: (_, i) => children[i]);
   }
@@ -311,12 +361,22 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
     try {
       final data = (await api.getLibraryApi().getLibraryItems(
         widget.libraryId,
-        LibraryItemsRequest(
-          limit: _pageSize,
-          page: _nextPage,
-          sort: defaultLibrarySortWireValue,
-          desc: defaultLibrarySortDesc,
-        ),
+        _isSeries
+            ? LibraryItemsRequest(
+                limit: _pageSize,
+                page: _nextPage,
+                sort: 'sequence',
+                desc: 0,
+                filter: LibraryFilter.grouped(LibraryFilterGroup.series, widget.seriesId!).queryValue,
+                collapseseries: 0,
+              )
+            : LibraryItemsRequest(
+                limit: _pageSize,
+                page: _nextPage,
+                sort: defaultLibrarySortWireValue,
+                desc: defaultLibrarySortDesc,
+                collapseseries: 1,
+              ),
       )).data;
       if (!mounted) return;
       final results = data?.results ?? const <LibraryItem>[];
@@ -329,7 +389,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _error = 'Could not load library';
+        _error = _isSeries ? 'Could not load series' : 'Could not load library';
         _loading = false;
       });
     }
@@ -346,20 +406,13 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
           return false;
         },
         child: WearScrollView.builder(
-          itemCount: 2 + _items.length + (showFooter ? 1 : 0) + (_items.isEmpty && !showFooter ? 1 : 0),
+          itemCount: _leadingRows + _items.length + (showFooter ? 1 : 0) + (_items.isEmpty && !showFooter ? 1 : 0),
           itemBuilder: (context, index) {
             if (index == 0) return _Header(widget.name);
-            if (index == 1) return _searchField();
-            final i = index - 2;
-            if (i < _items.length) {
-              final item = _items[i];
-              return _WearTile(
-                title: item.title,
-                subtitle: item.authorString,
-                onTap: () => Navigator.of(context).pop<WearPick>((itemId: item.id, episodeId: null)),
-              );
-            }
-            if (!showFooter) return const _Message('This library is empty.');
+            if (index < _leadingRows) return _searchField();
+            final i = index - _leadingRows;
+            if (i < _items.length) return _itemTile(_items[i]);
+            if (!showFooter) return _Message(_isSeries ? 'This series is empty.' : 'This library is empty.');
             if (_error != null) {
               return Column(
                 children: [
@@ -449,12 +502,27 @@ class _Message extends StatelessWidget {
 }
 
 class _WearTile extends StatelessWidget {
-  const _WearTile({required this.title, required this.onTap, this.subtitle, this.icon, this.trailing});
+  const _WearTile({
+    required this.title,
+    required this.onTap,
+    this.subtitle,
+    this.icon,
+    this.subtitlePrefix,
+    this.trailing,
+    this.chevron = false,
+  });
 
   final String title;
   final String? subtitle;
   final IconData? icon;
+
+  /// Highlighted text in front of the subtitle, e.g. the "#2" position in a
+  /// series. Kept off the title line so long titles keep the full width.
+  final String? subtitlePrefix;
   final Widget? trailing;
+
+  /// Marks tiles that open another list instead of playing.
+  final bool chevron;
   final VoidCallback onTap;
 
   @override
@@ -472,7 +540,12 @@ class _WearTile extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(minHeight: 48),
             child: Padding(
-              padding: EdgeInsetsDirectional.only(start: 14, end: trailing != null ? 4 : 14, top: 6, bottom: 6),
+              padding: EdgeInsetsDirectional.only(
+                start: 14,
+                end: trailing != null ? 4 : (chevron ? 8 : 14),
+                top: 6,
+                bottom: 6,
+              ),
               child: Row(
                 children: [
                   if (icon != null) ...[Icon(icon, size: 22, color: colorScheme.primary), const SizedBox(width: 10)],
@@ -487,9 +560,20 @@ class _WearTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
                         ),
-                        if (subtitle != null && subtitle.isNotEmpty)
-                          Text(
-                            subtitle,
+                        if ((subtitle != null && subtitle.isNotEmpty) || subtitlePrefix != null)
+                          Text.rich(
+                            TextSpan(
+                              children: [
+                                if (subtitlePrefix != null)
+                                  TextSpan(
+                                    text: subtitle != null && subtitle.isNotEmpty
+                                        ? '$subtitlePrefix · '
+                                        : subtitlePrefix,
+                                    style: TextStyle(fontWeight: FontWeight.w600, color: colorScheme.primary),
+                                  ),
+                                if (subtitle != null) TextSpan(text: subtitle),
+                              ],
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.70)),
@@ -497,7 +581,13 @@ class _WearTile extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (trailing != null) ...[const SizedBox(width: 4), trailing!],
+                  if (trailing != null) ...[
+                    const SizedBox(width: 4),
+                    trailing!,
+                  ] else if (chevron) ...[
+                    const SizedBox(width: 4),
+                    Icon(Icons.chevron_right, size: 22, color: colorScheme.onSurface.withValues(alpha: 0.60)),
+                  ],
                 ],
               ),
             ),
