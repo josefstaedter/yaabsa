@@ -1,5 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wear_plus/wear_plus.dart';
 import 'package:yaabsa/api/library/request/library_items_request.dart';
 import 'package:yaabsa/api/library/request/library_sort.dart';
 import 'package:yaabsa/api/library_items/library_item.dart';
@@ -7,12 +8,13 @@ import 'package:yaabsa/models/internal_download.dart';
 import 'package:yaabsa/provider/common/library_provider.dart';
 import 'package:yaabsa/provider/common/stored_downloads_provider.dart';
 import 'package:yaabsa/provider/core/user_providers.dart';
+import 'package:yaabsa/screens/wear/components/wear_ambient_view.dart';
+import 'package:yaabsa/screens/wear/components/wear_scroll_view.dart';
+import 'package:yaabsa/screens/wear/components/wear_swipe_to_dismiss.dart';
 import 'package:yaabsa/util/globals.dart' show downloadHandler;
 
 /// The item the user picked to play: library item id and optional episode id.
 typedef WearPick = ({String itemId, String? episodeId});
-
-const _roundInsets = EdgeInsets.fromLTRB(20, 28, 20, 36);
 
 /// Entry point for starting playback of something new on the watch: lists the
 /// downloaded items and the user's book libraries. Pops with a [WearPick].
@@ -30,9 +32,8 @@ class WearLibraryScreen extends ConsumerWidget {
     final libraries = ref.watch(userLibrariesProvider);
     final bookLibraries = (libraries.value ?? const []).where((l) => l.mediaType == 'book').toList(growable: false);
 
-    return Scaffold(
-      body: ListView(
-        padding: _roundInsets,
+    return _WearPage(
+      child: WearScrollView(
         children: [
           const _Header('Library'),
           if (downloads.isNotEmpty)
@@ -49,10 +50,7 @@ class WearLibraryScreen extends ConsumerWidget {
               onTap: () => _open(context, _WearLibraryItemsScreen(libraryId: library.id, name: library.name)),
             ),
           if (libraries.isLoading && bookLibraries.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-            )
+            const _Spinner()
           else if (bookLibraries.isEmpty && downloads.isEmpty)
             const _Message('No libraries available.\nCheck your connection.'),
         ],
@@ -75,14 +73,15 @@ class _WearDownloadsScreen extends ConsumerWidget {
       context: context,
       builder: (context) => Dialog(
         insetPadding: const EdgeInsets.all(24),
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
                 'Delete download?',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
               ),
               const SizedBox(height: 4),
               Text(
@@ -90,7 +89,7 @@ class _WearDownloadsScreen extends ConsumerWidget {
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11, color: colorScheme.onSurface.withValues(alpha: 0.70)),
+                style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.70)),
               ),
               const SizedBox(height: 8),
               Row(
@@ -99,11 +98,13 @@ class _WearDownloadsScreen extends ConsumerWidget {
                   IconButton(
                     icon: const Icon(Icons.close),
                     tooltip: 'Cancel',
+                    constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                     onPressed: () => Navigator.of(context).pop(false),
                   ),
                   IconButton.filled(
                     icon: const Icon(Icons.delete),
                     tooltip: 'Delete',
+                    constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                     style: IconButton.styleFrom(
                       backgroundColor: colorScheme.error,
                       foregroundColor: colorScheme.onError,
@@ -134,9 +135,8 @@ class _WearDownloadsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final downloads = _playableDownloads(ref);
-    return Scaffold(
-      body: ListView(
-        padding: _roundInsets,
+    return _WearPage(
+      child: WearScrollView(
         children: [
           const _Header('Downloaded'),
           for (final download in downloads)
@@ -145,11 +145,11 @@ class _WearDownloadsScreen extends ConsumerWidget {
               subtitle: download.item!.authorString,
               onTap: () => Navigator.of(context).pop<WearPick>((itemId: download.item!.id, episodeId: null)),
               trailing: IconButton(
-                icon: Icon(Icons.delete_outline, size: 18, color: Theme.of(context).colorScheme.error),
+                icon: Icon(Icons.delete_outline, size: 22, color: Theme.of(context).colorScheme.error),
                 tooltip: 'Delete download',
                 onPressed: () => _delete(context, ref, download),
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
               ),
             ),
           if (downloads.isEmpty) const _Message('No downloads.'),
@@ -250,25 +250,26 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
         controller: _searchController,
         textInputAction: TextInputAction.search,
         onSubmitted: _search,
-        style: TextStyle(fontSize: 12, color: colorScheme.onSurface),
+        style: TextStyle(fontSize: 14, color: colorScheme.onSurface),
         decoration: InputDecoration(
-          isDense: true,
           hintText: 'Search',
-          hintStyle: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.54)),
-          prefixIcon: Icon(Icons.search, size: 16, color: colorScheme.onSurface.withValues(alpha: 0.54)),
-          prefixIconConstraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          hintStyle: TextStyle(fontSize: 14, color: colorScheme.onSurface.withValues(alpha: 0.60)),
+          prefixIcon: Icon(Icons.search, size: 20, color: colorScheme.onSurface.withValues(alpha: 0.70)),
+          prefixIconConstraints: const BoxConstraints(minWidth: 40, minHeight: 48),
           suffixIcon: _query != null
               ? IconButton(
-                  icon: Icon(Icons.close, size: 16, color: colorScheme.onSurface.withValues(alpha: 0.54)),
+                  icon: Icon(Icons.close, size: 20, color: colorScheme.onSurface.withValues(alpha: 0.70)),
+                  tooltip: 'Clear search',
                   onPressed: _clearSearch,
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 )
               : null,
+          constraints: const BoxConstraints(minHeight: 48),
           filled: true,
           fillColor: colorScheme.surfaceContainerHigh,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(18), borderSide: BorderSide.none),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
         ),
       ),
     );
@@ -277,20 +278,9 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
   Widget _searchResults() {
     final children = <Widget>[_Header(widget.name), _searchField()];
     if (_searching) {
-      children.add(
-        const Padding(
-          padding: EdgeInsets.all(12),
-          child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
-        ),
-      );
+      children.add(const _Spinner());
     } else if (_searchError != null) {
-      children.addAll([
-        _Message(_searchError!),
-        TextButton(
-          onPressed: () => _search(_query!),
-          child: const Text('Retry', style: TextStyle(fontSize: 12)),
-        ),
-      ]);
+      children.addAll([_Message(_searchError!), _RetryButton(onPressed: () => _search(_query!))]);
     } else if (_results.isEmpty) {
       children.add(const _Message('No matches.'));
     } else {
@@ -304,7 +294,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
         );
       }
     }
-    return ListView(padding: _roundInsets, children: children);
+    return WearScrollView.builder(itemCount: children.length, itemBuilder: (_, i) => children[i]);
   }
 
   Future<void> _loadMore() async {
@@ -347,16 +337,15 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
 
   @override
   Widget build(BuildContext context) {
-    if (_query != null) return Scaffold(body: _searchResults());
+    if (_query != null) return _WearPage(child: _searchResults());
     final showFooter = _loading || _error != null || _hasMore;
-    return Scaffold(
-      body: NotificationListener<ScrollNotification>(
+    return _WearPage(
+      child: NotificationListener<ScrollNotification>(
         onNotification: (n) {
           if (n.metrics.extentAfter < 200) _loadMore();
           return false;
         },
-        child: ListView.builder(
-          padding: _roundInsets,
+        child: WearScrollView.builder(
           itemCount: 2 + _items.length + (showFooter ? 1 : 0) + (_items.isEmpty && !showFooter ? 1 : 0),
           itemBuilder: (context, index) {
             if (index == 0) return _Header(widget.name);
@@ -375,22 +364,54 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
               return Column(
                 children: [
                   _Message(_error!),
-                  TextButton(
-                    onPressed: _loadMore,
-                    child: const Text('Retry', style: TextStyle(fontSize: 12)),
-                  ),
+                  _RetryButton(onPressed: _loadMore),
                 ],
               );
             }
-            return const Padding(
-              padding: EdgeInsets.all(12),
-              child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
-            );
+            return const _Spinner();
           },
         ),
       ),
     );
   }
+}
+
+/// Shared frame for the library screens: swipe right to go back, and the
+/// burn-in safe ambient view while the watch is dimmed.
+class _WearPage extends StatelessWidget {
+  const _WearPage({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => WearSwipeToDismiss(
+    child: AmbientMode(
+      builder: (context, mode, _) => Scaffold(body: mode == WearMode.ambient ? const WearAmbientView() : child),
+    ),
+  );
+}
+
+class _Spinner extends StatelessWidget {
+  const _Spinner();
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.all(12),
+    child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+  );
+}
+
+class _RetryButton extends StatelessWidget {
+  const _RetryButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    onPressed: onPressed,
+    style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+    child: const Text('Retry', style: TextStyle(fontSize: 12)),
+  );
 }
 
 class _Header extends StatelessWidget {
@@ -406,7 +427,7 @@ class _Header extends StatelessWidget {
       textAlign: TextAlign.center,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.primary),
+      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.primary),
     ),
   );
 }
@@ -422,7 +443,7 @@ class _Message extends StatelessWidget {
     child: Text(
       text,
       textAlign: TextAlign.center,
-      style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.70)),
+      style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.70)),
     ),
   );
 }
@@ -444,38 +465,41 @@ class _WearTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         color: colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(24),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            child: Row(
-              children: [
-                if (icon != null) ...[Icon(icon, size: 18, color: colorScheme.primary), const SizedBox(width: 10)],
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
-                      ),
-                      if (subtitle != null && subtitle.isNotEmpty)
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: EdgeInsetsDirectional.only(start: 14, end: trailing != null ? 4 : 14, top: 6, bottom: 6),
+              child: Row(
+                children: [
+                  if (icon != null) ...[Icon(icon, size: 22, color: colorScheme.primary), const SizedBox(width: 10)],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
                         Text(
-                          subtitle,
-                          maxLines: 1,
+                          title,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 10, color: colorScheme.onSurface.withValues(alpha: 0.60)),
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: colorScheme.onSurface),
                         ),
-                    ],
+                        if (subtitle != null && subtitle.isNotEmpty)
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.70)),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-                if (trailing != null) ...[const SizedBox(width: 4), trailing!],
-              ],
+                  if (trailing != null) ...[const SizedBox(width: 4), trailing!],
+                ],
+              ),
             ),
           ),
         ),
