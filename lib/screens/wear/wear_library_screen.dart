@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wear_plus/wear_plus.dart';
+import 'package:yaabsa/api/library/library.dart';
 import 'package:yaabsa/api/library/request/library_filter.dart';
 import 'package:yaabsa/api/library/request/library_items_request.dart';
 import 'package:yaabsa/api/library/request/library_sort.dart';
@@ -32,16 +33,35 @@ String _bookCount(int? count) => count == null ? 'Series' : (count == 1 ? '1 boo
 
 /// Entry point for starting playback of something new on the watch: lists the
 /// downloaded items and the user's book libraries. Pops with a [WearPick].
-class WearLibraryScreen extends ConsumerWidget {
+class WearLibraryScreen extends ConsumerStatefulWidget {
   const WearLibraryScreen({super.key});
+
+  @override
+  ConsumerState<WearLibraryScreen> createState() => _WearLibraryScreenState();
+}
+
+class _WearLibraryScreenState extends ConsumerState<WearLibraryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // The library list is kept alive for the whole app run (the selected
+    // library depends on it), so it would otherwise only be fetched once.
+    // Refetch on every open so granted or revoked library access shows up.
+    ref.invalidate(userLibrariesProvider);
+  }
 
   Future<void> _open(BuildContext context, Widget screen) => _openAndForward(context, screen);
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final downloads = _playableDownloads(ref);
     final libraries = ref.watch(userLibrariesProvider);
-    final bookLibraries = (libraries.value ?? const []).where((l) => l.mediaType == 'book').toList(growable: false);
+    // While refetching, hide the previous list: it may still contain a
+    // library the user can no longer open. On a failed fetch the provider
+    // falls back to its cached list, so offline use still works.
+    final bookLibraries = libraries.isLoading
+        ? const <Library>[]
+        : (libraries.value ?? const []).where((l) => l.mediaType == 'book').toList(growable: false);
 
     return _WearPage(
       child: WearScrollView(
@@ -60,7 +80,7 @@ class WearLibraryScreen extends ConsumerWidget {
               title: library.name,
               onTap: () => _open(context, _WearLibraryItemsScreen(libraryId: library.id, name: library.name)),
             ),
-          if (libraries.isLoading && bookLibraries.isEmpty)
+          if (libraries.isLoading)
             const _Spinner()
           else if (bookLibraries.isEmpty && downloads.isEmpty)
             const _Message('No libraries available.\nCheck your connection.'),
