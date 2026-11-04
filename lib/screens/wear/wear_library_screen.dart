@@ -6,7 +6,7 @@ import 'package:yaabsa/api/library/request/library_filter.dart';
 import 'package:yaabsa/api/library/request/library_items_request.dart';
 import 'package:yaabsa/api/library/request/library_sort.dart';
 import 'package:yaabsa/api/library_items/library_item.dart';
-import 'package:yaabsa/api/library_items/series.dart';
+import 'package:yaabsa/api/library/search_series.dart';
 import 'package:yaabsa/models/internal_download.dart';
 import 'package:yaabsa/provider/common/library_provider.dart';
 import 'package:yaabsa/provider/common/stored_downloads_provider.dart';
@@ -29,6 +29,9 @@ Future<void> _openAndForward(BuildContext context, Widget screen) async {
 void _pickBook(BuildContext context, String itemId) =>
     Navigator.of(context).pop<WearPick>((itemId: itemId, episodeId: null));
 
+/// Visible book count of a series. Only counts books the server actually
+/// returned for this user, never the server's total (`numBooks`), which also
+/// includes books hidden by permissions such as explicit content.
 String _bookCount(int? count) => count == null ? 'Series' : (count == 1 ? '1 book' : '$count books');
 
 /// Entry point for starting playback of something new on the watch: lists the
@@ -216,7 +219,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
   /// Non-null while showing results for a submitted query instead of the paged list.
   String? _query;
   List<LibraryItem> _results = const [];
-  List<Series> _seriesResults = const [];
+  List<SearchSeries> _seriesResults = const [];
   bool _searching = false;
   String? _searchError;
 
@@ -228,10 +231,10 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
   void _openSeries(String seriesId, String name) =>
       _openAndForward(context, _WearLibraryItemsScreen(libraryId: widget.libraryId, name: name, seriesId: seriesId));
 
-  Widget _seriesTile(String seriesId, String name, int? numBooks) => _WearTile(
+  Widget _seriesTile(String seriesId, String name, int? visibleBooks) => _WearTile(
     icon: Icons.collections_bookmark,
     title: name,
-    subtitle: _bookCount(numBooks),
+    subtitle: _bookCount(visibleBooks),
     chevron: true,
     onTap: () => _openSeries(seriesId, name),
   );
@@ -246,7 +249,7 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
 
   Widget _itemTile(LibraryItem item) {
     final collapsed = item.collapsedSeries;
-    if (collapsed != null) return _seriesTile(collapsed.id, item.title, collapsed.numBooks);
+    if (collapsed != null) return _seriesTile(collapsed.id, item.title, collapsed.libraryItemIds?.length);
     final sequence = _isSeries ? _sequenceOf(item) : null;
     return _WearTile(
       subtitlePrefix: sequence == null ? null : '#$sequence',
@@ -292,7 +295,8 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
             .whereType<LibraryItem>()
             .where((i) => i.isMissing != true && i.isInvalid != true)
             .toList(growable: false);
-        _seriesResults = (data?.series ?? const []).map((r) => r.series).toList(growable: false);
+        // A series whose books are all hidden from this user is left out.
+        _seriesResults = (data?.series ?? const []).where((r) => r.books.isNotEmpty).toList(growable: false);
         _searching = false;
       });
     } catch (_) {
@@ -359,8 +363,8 @@ class _WearLibraryItemsScreenState extends ConsumerState<_WearLibraryItemsScreen
       children.add(const _Message('No matches.'));
     } else {
       // Series first: a matching series name is the more specific hit.
-      for (final series in _seriesResults) {
-        children.add(_seriesTile(series.id, series.name, series.numBooks ?? series.libraryItemIds?.length));
+      for (final result in _seriesResults) {
+        children.add(_seriesTile(result.series.id, result.series.name, result.books.length));
       }
       children.addAll(_results.map(_itemTile));
     }
