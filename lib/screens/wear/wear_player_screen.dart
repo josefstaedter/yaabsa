@@ -285,7 +285,8 @@ class _WearPlayerScreenState extends ConsumerState<WearPlayerScreen> {
   }
 
   Future<void> _browse() async {
-    final pick = await Navigator.of(context).push<WearPick>(MaterialPageRoute(builder: (_) => const WearLibraryScreen()));
+    final pick = await Navigator.of(context)
+        .push<WearPick>(MaterialPageRoute(builder: (_) => const WearLibraryScreen()));
     if (pick != null && mounted) await _playPicked(pick);
   }
 
